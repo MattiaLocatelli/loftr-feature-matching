@@ -7,8 +7,13 @@ import torch
 from kornia_moons.viz import draw_LAF_matches
 from kornia.feature import LoFTR
 
-img1 = K.io.load_image("image1.jpeg", K.io.ImageLoadType.RGB32)[None, ...]
-img2 = K.io.load_image("image2.jpeg", K.io.ImageLoadType.RGB32)[None, ...]
+def load_img(path):
+    img = cv2.imread(path)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return K.image_to_tensor(img, keepdim=False).float() / 255.0
+
+img1 = load_img("image1.jpeg")
+img2 = load_img("image2.jpeg")
 
 img1 = K.geometry.resize(img1, (512, 512), antialias=True)
 img2 = K.geometry.resize(img2, (512, 512), antialias=True)
