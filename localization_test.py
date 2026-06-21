@@ -32,8 +32,8 @@ for img_name in offline_images:
     offline_img = load_img(os.path.join(offline_folder, img_name))
     
     # Resizing per LoFTR (spesso necessario per performance/memoria)
-    img0 = K.geometry.resize(online_img, (512, 512), antialias=True)
-    img1 = K.geometry.resize(offline_img, (512, 512), antialias=True)
+    img0 = K.geometry.resize(online_img, (250, 960), antialias=True)
+    img1 = K.geometry.resize(offline_img, (250, 960), antialias=True)
     # img0 = online_img
     # img1 = offline_img
     
