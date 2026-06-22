@@ -6,10 +6,9 @@ from kornia.feature import LoFTR
 from kornia_moons.viz import draw_LAF_matches
 import matplotlib.pyplot as plt
 
-# Configurazione dispositivo
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Caricamento LoFTR
+# LoFTR load
 matcher = LoFTR(pretrained="outdoor").to(device)
 
 def load_img(path):
@@ -26,44 +25,56 @@ results = []
 
 # 2. Pipeline
 valid_matches = []
-MIN_INLIERS = 30
+MIN_INLIERS = 100
+CONFIDENCE_THRESHOLD = 0.8
 
 for img_name in offline_images:
     offline_img = load_img(os.path.join(offline_folder, img_name))
     
-    # Resizing per LoFTR (spesso necessario per performance/memoria)
+    # Resizing due to GPU memory limits
     img0 = K.geometry.resize(online_img, (250, 960), antialias=True)
     img1 = K.geometry.resize(offline_img, (250, 960), antialias=True)
     # img0 = online_img
     # img1 = offline_img
     
-    # # Aggiungi questo test dopo il caricamento delle immagini
+    # # Test after images load
     # input_dict = {"image0": K.color.rgb_to_grayscale(img0), "image1": K.color.rgb_to_grayscale(img0)}
     # with torch.inference_mode():
     #     test_match = matcher(input_dict)
-    # print(f"Test self-matching: {test_match['keypoints0'].shape[0]} punti trovati.")
+    # print(f"Test self-matching: {test_match['keypoints0'].shape[0]} points found.")
     
     input_dict = {
         "image0": K.color.rgb_to_grayscale(img0),
         "image1": K.color.rgb_to_grayscale(img1),
     }
 
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    
+    start_event.record()
     with torch.inference_mode():
         correspondences = matcher(input_dict)
+    end_event.record()
+    
+    torch.cuda.synchronize()
+    inference_time = start_event.elapsed_time(end_event)
+    
+    # Confidence filter
+    conf = correspondences["confidence"].cpu().numpy()
+    mask_conf = conf > CONFIDENCE_THRESHOLD
     
     mkpts0 = correspondences["keypoints0"].cpu().numpy()
     mkpts1 = correspondences["keypoints1"].cpu().numpy()
     
-    # 3. Validazione geometrica (Filtra i match spuri)
+    # 3. Geometric validation
     if len(mkpts0) > 8:
-        _, inliers = cv2.findFundamentalMat(mkpts0, mkpts1, cv2.USAC_MAGSAC, 0.5, 0.999, 1000)
+        _, inliers = cv2.findFundamentalMat(mkpts0, mkpts1, cv2.RANSAC, 0.5, 0.999, 1000)
         inliers_mask = inliers.flatten() > 0
         num_inliers = sum(inliers_mask)
         
-        print(f"Immagine: {img_name} | Inliers: {num_inliers}")
+        print(f"Frame: {img_name} | Inliers: {num_inliers} | Inf Time: {inference_time:.3f} ms")
         
         if num_inliers >= MIN_INLIERS:
-            # Salviamo tutto il necessario per la visualizzazione
             valid_matches.append({
                 "name": img_name,
                 "inliers_count": num_inliers,
@@ -74,9 +85,9 @@ for img_name in offline_images:
                 "mask": inliers_mask
             })
 
-# 4. Selezione migliori match
+# 4. Select best matches
 for match in valid_matches:
-    print(f"\nVisualizzazione match per: {match['name']} ({match['inliers_count']} inliers)")
+    print(f"\Visualization for match: {match['name']} ({match['inliers_count']} inliers)")
     
     draw_LAF_matches(
         K.feature.laf_from_center_scale_ori(torch.from_numpy(match['mkpts0']).view(1, -1, 2)),
@@ -91,4 +102,4 @@ for match in valid_matches:
     plt.show()
 
 if not valid_matches:
-    print("Nessun match trovato sopra la soglia richiesta.")
+    print("No match found above the threshold.")
