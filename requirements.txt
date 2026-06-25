@@ -3,4 +3,7 @@ kornia_moons
 torch
 opencv-python
 matplotlib
-
+torchvision
+transformers
+accelerate
+pillow

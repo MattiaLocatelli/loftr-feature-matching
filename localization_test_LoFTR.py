@@ -17,23 +17,24 @@ def load_img(path):
     return K.image_to_tensor(img, keepdim=False).float().to(device) / 255.0
 
 # 1. Setup
-online_img = load_img("./Online_Keyframe/third_billboard6.png")
-offline_folder = "./Offline_Keyframes/"
+online_img = load_img("./Online_Keyframe/R1257.png")
+offline_folder = "./Offline_Keyframes_Turn2-3/"
 offline_images = [f for f in os.listdir(offline_folder) if f.endswith('.png')]
 
 results = []
 
 # 2. Pipeline
 valid_matches = []
+inference_times = []
 MIN_INLIERS = 100
-CONFIDENCE_THRESHOLD = 0.8
+CONFIDENCE_THRESHOLD = 0.7
 
 for img_name in offline_images:
     offline_img = load_img(os.path.join(offline_folder, img_name))
     
     # Resizing due to GPU memory limits
-    img0 = K.geometry.resize(online_img, (250, 960), antialias=True)
-    img1 = K.geometry.resize(offline_img, (250, 960), antialias=True)
+    img0 = K.geometry.resize(online_img, (256, 960), antialias=True)
+    img1 = K.geometry.resize(offline_img, (256, 960), antialias=True)
     # img0 = online_img
     # img1 = offline_img
     
@@ -58,17 +59,18 @@ for img_name in offline_images:
     
     torch.cuda.synchronize()
     inference_time = start_event.elapsed_time(end_event)
+    inference_times.append(inference_time)
     
     # Confidence filter
     conf = correspondences["confidence"].cpu().numpy()
     mask_conf = conf > CONFIDENCE_THRESHOLD
     
-    mkpts0 = correspondences["keypoints0"].cpu().numpy()
-    mkpts1 = correspondences["keypoints1"].cpu().numpy()
+    mkpts0 = correspondences["keypoints0"].cpu().numpy()[mask_conf]
+    mkpts1 = correspondences["keypoints1"].cpu().numpy()[mask_conf]
     
     # 3. Geometric validation
     if len(mkpts0) > 8:
-        _, inliers = cv2.findFundamentalMat(mkpts0, mkpts1, cv2.RANSAC, 0.5, 0.999, 1000)
+        _, inliers = cv2.findFundamentalMat(mkpts0, mkpts1, cv2.USAC_MAGSAC, 0.5, 0.999, 1000)
         inliers_mask = inliers.flatten() > 0
         num_inliers = sum(inliers_mask)
         
@@ -87,7 +89,7 @@ for img_name in offline_images:
 
 # 4. Select best matches
 for match in valid_matches:
-    print(f"\Visualization for match: {match['name']} ({match['inliers_count']} inliers)")
+    print(f"Visualization for match: {match['name']} ({match['inliers_count']} inliers)")
     
     draw_LAF_matches(
         K.feature.laf_from_center_scale_ori(torch.from_numpy(match['mkpts0']).view(1, -1, 2)),
@@ -100,6 +102,8 @@ for match in valid_matches:
     )
     plt.title(f"Match: {match['name']} - Inliers: {match['inliers_count']}")
     plt.show()
+
+print(f"Mean Inference Time: {sum(inference_times)/len(inference_times):.3f}")
 
 if not valid_matches:
     print("No match found above the threshold.")
