@@ -2,6 +2,7 @@ import cv2
 import kornia as K
 import torch
 import os
+import csv
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import matplotlib
@@ -71,111 +72,144 @@ def make_matching_figure(
         return fig
 
 # 1. Setup
-online_img = load_img("./Online_Keyframe/R1257.png")
-offline_folder = "./Offline_Keyframes_Turn2-3/"
-offline_images = [f for f in os.listdir(offline_folder) if f.endswith('.png')]
+online_img_pth = "Online_Keyframe/R1257.png"
+offline_folder = "Offline_Keyframes_Turn2-3/"
+offline_imgs = [f for f in os.listdir(offline_folder) if f.endswith('.png')]
+
+target_w, target_h = 960, 256
 
 output_dir = "output_matches"
 os.makedirs(output_dir, exist_ok=True)
+csv_path = os.path.join(output_dir, "matching_log.csv")
 
+img0_raw = cv2.imread(online_img_pth, cv2.IMREAD_GRAYSCALE)
+target_w, target_h = 960, 256 #almost half the original size (1920x500)
+img0_raw = cv2.resize(img0_raw, (target_w, target_h))
+img0_raw = cv2.resize(img0_raw, (img0_raw.shape[1]//32*32, img0_raw.shape[0]//32*32))
+
+img0 = torch.from_numpy(img0_raw)[None][None].cuda() / 255.
+    
 results = []
+confidences = []
+inliers_number = []
+csv_rows = []
 
 # 2. Pipeline
 valid_matches = []
 inference_times = []
 MIN_INLIERS = 0
 CONFIDENCE_THRESHOLD = 0.7
+MATCH_THRESHOLD = 0.7
 
-for img_name in offline_images:
-    offline_img = load_img(os.path.join(offline_folder, img_name))
-    
-    # Resizing due to GPU memory limits
-    img0 = K.geometry.resize(online_img, (256, 960), antialias=True)
-    img1 = K.geometry.resize(offline_img, (256, 960), antialias=True)
-    # img0 = online_img
-    # img1 = offline_img
-    
-    # # Test after images load
-    # input_dict = {"image0": K.color.rgb_to_grayscale(img0), "image1": K.color.rgb_to_grayscale(img0)}
-    # with torch.inference_mode():
-    #     test_match = matcher(input_dict)
-    # print(f"Test self-matching: {test_match['keypoints0'].shape[0]} points found.")
-    
-    input_dict = {
-        "image0": K.color.rgb_to_grayscale(img0),
-        "image1": K.color.rgb_to_grayscale(img1),
-    }
+for img_name in offline_imgs:
+    img1_raw = cv2.imread(os.path.join(offline_folder, img_name), cv2.IMREAD_GRAYSCALE)
+    if img1_raw is None: continue
 
+    img1_raw = cv2.resize(img1_raw, (target_w, target_h))
+        
+    # img1_raw = cv2.resize(img1_raw, (img1_raw.shape[1]//32*32, img1_raw.shape[0]//32*32))
+    img1 = torch.from_numpy(img1_raw)[None][None].cuda() / 255.
+    
+    batch = {'image0': img0, 'image1': img1}
+    
+    torch.cuda.synchronize() 
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
     
     start_event.record()
-    with torch.inference_mode():
-        correspondences = matcher(input_dict)
+    
+    with torch.no_grad():
+        correspondences = matcher(batch)
     end_event.record()
     
     torch.cuda.synchronize()
     inference_time = start_event.elapsed_time(end_event)
     inference_times.append(inference_time)
-    
-    # Confidence filter
-    conf = correspondences["confidence"].cpu().numpy()
-    mask_conf = conf > CONFIDENCE_THRESHOLD
-    
-    mkpts0 = correspondences["keypoints0"].cpu().numpy()[mask_conf]
-    mkpts1 = correspondences["keypoints1"].cpu().numpy()[mask_conf]
-    
-    # 3. Geometric validation
-    if len(mkpts0) > 8:
-        _, inliers = cv2.findFundamentalMat(mkpts0, mkpts1, cv2.USAC_MAGSAC, 0.5, 0.999, 1000)
-        inliers_mask = inliers.flatten() > 0
-        num_inliers = sum(inliers_mask)
-        
-        print(f"Frame: {img_name} | Inliers: {num_inliers} | Inf Time: {inference_time:.3f} ms")
-        
-        if num_inliers >= MIN_INLIERS:
-            valid_matches.append({
-                "name": img_name,
-                "inliers_count": num_inliers,
-                "img0": img0,
-                "img1": img1,
-                "mkpts0": mkpts0,
-                "mkpts1": mkpts1,
-                "mask": inliers_mask,
-                "mask_conf": conf[mask_conf]
-            })
+            
+    mkpts0 = correspondences['keypoints0'].cpu().numpy()
+    mkpts1 = correspondences['keypoints1'].cpu().numpy()
+    mconf = correspondences['confidence'].cpu().numpy()
 
-# 4. Select best matches
-for match in valid_matches:
-    print(f"Visualization for match: {match['name']} ({match['inliers_count']} inliers)")
+    # Draw
+    raw_mconf_max = None
     
-    # draw_LAF_matches(
-    #     K.feature.laf_from_center_scale_ori(torch.from_numpy(match['mkpts0']).view(1, -1, 2)),
-    #     K.feature.laf_from_center_scale_ori(torch.from_numpy(match['mkpts1']).view(1, -1, 2)),
-    #     torch.arange(len(match['mkpts0'])).view(-1, 1).repeat(1, 2),
-    #     K.tensor_to_image(match['img0']),
-    #     K.tensor_to_image(match['img1']),
-    #     match['mask'],
-    #     draw_dict={"inlier_color": (0.1, 1, 0.1, 0.5), "tentative_color": None}
-    # )
-    # plt.title(f"Match: {match['name']} - Inliers: {match['inliers_count']}")
-    
-    img0_np = K.image.tensor_to_image(match['img0'].cpu())
-    img1_np = K.image.tensor_to_image(match['img1'].cpu())
-    
-    # n_pts = len(match['mkpts0'])
-    # color = np.array([[0.1, 1.0, 0.1, 0.5]] * n_pts)
-    color = cm.jet(match['mask_conf'])
-    
-    text = ['LoFTR', 'Matches: {}'.format(len(mkpts0))]
-    fig = make_matching_figure(img0_np, img1_np, match['mkpts0'], match['mkpts1'], color, text=text)
+    color = cm.jet(mconf)
 
-    save_path = os.path.join(output_dir, f"match_{match['name']}")
+    # normalize confidence of keypoints matches
+    print(f"Min: {mconf.min()}, Max: {mconf.max()}, Mean: {mconf.mean()}")
+    
+    # filter keypoints
+    threshold = MATCH_THRESHOLD
+    mask = mconf > threshold
+    mkpts0_filtered = mkpts0[mask]
+    mkpts1_filtered = mkpts1[mask]
+    color_filtered = color[mask]
+    
+    confidences.append(mconf.mean())
+    inliers_number.append(len(mkpts0_filtered))
+    
+    text = ['LoFTR', 'Matches: {}'.format(len(mkpts0_filtered))]
+    fig = make_matching_figure(img0_raw, img1_raw, mkpts0_filtered, mkpts1_filtered, color_filtered, text=text)
+    
+    save_path = os.path.join(output_dir, f"match_{img_name}")
     fig.savefig(save_path, bbox_inches='tight', dpi=150)
     
-    plt.close(fig)    
+    plt.close(fig)
+    
+    print(f"Keyframe: {img_name} | Matches: {len(mkpts0_filtered)} | Inf Time {inference_time:.3f}ms")
 
-print(f"Mean Inference Time: {sum(inference_times)/len(inference_times):.3f}")
+    csv_rows.append({
+        "image_name": img_name,
+        "raw_mconf_max": raw_mconf_max,
+        "mconf_min": float(mconf.min()),
+        "mconf_max": float(mconf.max()),
+        "mconf_mean": float(mconf.mean()),
+        "matches": int(len(mkpts0_filtered)),
+        "inference_time_ms": float(inference_time),
+        "threshold": float(threshold),
+    })
 
-if not valid_matches:
-    print("No match found above the threshold.")
+summary_rows = [
+    {
+        "image_name": "__summary__",
+        "raw_mconf_max": None,
+        "mconf_min": None,
+        "mconf_max": None,
+        "mconf_mean": float(np.mean(confidences)) if confidences else None,
+        "matches": None,
+        "inference_time_ms": float(sum(inference_times[1:])/(len(inference_times)-1)) if len(inference_times) > 1 else None,
+        "threshold": float(MATCH_THRESHOLD),
+        "mean_inliers": float(np.mean(inliers_number)) if inliers_number else None,
+        "note": f"Mean Number Inliers with confidence > {MATCH_THRESHOLD}",
+    }
+]
+
+fieldnames = [
+    "image_name",
+    "raw_mconf_max",
+    "mconf_min",
+    "mconf_max",
+    "mconf_mean",
+    "matches",
+    "inference_time_ms",
+    "threshold",
+    "mean_inliers",
+    "note",
+]
+
+with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
+    writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in csv_rows:
+        writer.writerow(row)
+    for row in summary_rows:
+        writer.writerow(row)
+
+mean_inf_time = float(sum(inference_times[1:]) / (len(inference_times) - 1)) if len(inference_times) > 1 else (float(inference_times[0]) if inference_times else 0.0)
+mean_conf = float(np.mean(confidences)) if confidences else 0.0
+mean_inliers = float(np.mean(inliers_number)) if inliers_number else 0.0
+
+print(f"Mean Inference Time: {mean_inf_time:.3f}ms")
+print(f"Mean Confidence: {mean_conf:.6f}")
+print(f"Mean Number Inliers: {mean_inliers:.3f} with confidence > {MATCH_THRESHOLD}")
+print(f"Saved CSV: {csv_path}")
