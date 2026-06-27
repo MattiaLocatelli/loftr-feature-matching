@@ -80,7 +80,7 @@ target_w, target_h = 960, 256
 
 output_dir = "output_matches"
 os.makedirs(output_dir, exist_ok=True)
-csv_path = os.path.join(output_dir, "matching_log.csv")
+csv_path = os.path.join(output_dir, "LoFTR_stats.csv")
 
 img0_raw = cv2.imread(online_img_pth, cv2.IMREAD_GRAYSCALE)
 target_w, target_h = 960, 256 #almost half the original size (1920x500)
@@ -100,6 +100,7 @@ inference_times = []
 MIN_INLIERS = 0
 CONFIDENCE_THRESHOLD = 0.7
 MATCH_THRESHOLD = 0.7
+inliers_geometric_number = []
 
 for img_name in offline_imgs:
     img1_raw = cv2.imread(os.path.join(offline_folder, img_name), cv2.IMREAD_GRAYSCALE)
@@ -145,8 +146,15 @@ for img_name in offline_imgs:
     mkpts1_filtered = mkpts1[mask]
     color_filtered = color[mask]
     
-    confidences.append(mconf.mean())
+    num_inliers = 0
+    if len(mkpts0_filtered) > 8:
+        F, inliers = cv2.findFundamentalMat(mkpts0_filtered, mkpts1_filtered, cv2.USAC_MAGSAC, 0.5, 0.999, 1000)
+        if inliers is not None:
+            num_inliers = int(np.sum(inliers))
+    
+    inliers_geometric_number.append(num_inliers)
     inliers_number.append(len(mkpts0_filtered))
+    confidences.append(mconf.mean())
     
     text = ['LoFTR', 'Matches: {}'.format(len(mkpts0_filtered))]
     fig = make_matching_figure(img0_raw, img1_raw, mkpts0_filtered, mkpts1_filtered, color_filtered, text=text)
@@ -160,42 +168,28 @@ for img_name in offline_imgs:
 
     csv_rows.append({
         "image_name": img_name,
-        "raw_mconf_max": raw_mconf_max,
-        "mconf_min": float(mconf.min()),
-        "mconf_max": float(mconf.max()),
-        "mconf_mean": float(mconf.mean()),
+        "conf_min": float(mconf.min()),
+        "conf_max": float(mconf.max()),
+        "conf_mean": float(mconf.mean()),
         "matches": int(len(mkpts0_filtered)),
+        "inliers": int(num_inliers),
         "inference_time_ms": float(inference_time),
-        "threshold": float(threshold),
+        "threshold": float(MATCH_THRESHOLD),
     })
 
 summary_rows = [
     {
         "image_name": "__summary__",
-        "raw_mconf_max": None,
-        "mconf_min": None,
-        "mconf_max": None,
-        "mconf_mean": float(np.mean(confidences)) if confidences else None,
-        "matches": None,
-        "inference_time_ms": float(sum(inference_times[1:])/(len(inference_times)-1)) if len(inference_times) > 1 else None,
-        "threshold": float(MATCH_THRESHOLD),
-        "mean_inliers": float(np.mean(inliers_number)) if inliers_number else None,
-        "note": f"Mean Number Inliers with confidence > {MATCH_THRESHOLD}",
+        "conf_mean": float(np.mean(confidences)),
+        "matches": float(np.mean(inliers_number)),
+        "inliers": float(np.mean(inliers_geometric_number)),
+        "inference_time_ms": float(sum(inference_times[1:])/(len(inference_times)-1)),
+        "threshold": float(threshold),
+        "note": "Mean values",
     }
 ]
 
-fieldnames = [
-    "image_name",
-    "raw_mconf_max",
-    "mconf_min",
-    "mconf_max",
-    "mconf_mean",
-    "matches",
-    "inference_time_ms",
-    "threshold",
-    "mean_inliers",
-    "note",
-]
+fieldnames = ["image_name", "conf_min", "conf_max", "conf_mean", "matches", "inliers", "inference_time_ms", "threshold", "note"]
 
 with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
     writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
@@ -205,11 +199,7 @@ with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
     for row in summary_rows:
         writer.writerow(row)
 
-mean_inf_time = float(sum(inference_times[1:]) / (len(inference_times) - 1)) if len(inference_times) > 1 else (float(inference_times[0]) if inference_times else 0.0)
-mean_conf = float(np.mean(confidences)) if confidences else 0.0
-mean_inliers = float(np.mean(inliers_number)) if inliers_number else 0.0
-
-print(f"Mean Inference Time: {mean_inf_time:.3f}ms")
-print(f"Mean Confidence: {mean_conf:.6f}")
-print(f"Mean Number Inliers: {mean_inliers:.3f} with confidence > {MATCH_THRESHOLD}")
+print(f"Mean Inference Time: {sum(inference_times[1:])/(len(inference_times)-1):.3f}ms")
+print(f"Mean Confidence: {np.mean(confidences)}")
+print(f"Mean Number Inliers: {np.mean(inliers_number)} with confidence > {MATCH_THRESHOLD}")
 print(f"Saved CSV: {csv_path}")
