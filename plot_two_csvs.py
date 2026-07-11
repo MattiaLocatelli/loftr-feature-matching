@@ -7,11 +7,12 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 
-METRICS = ["conf_mean", "matches", "inliers", "inference_time_ms"]
+METRICS = ["conf_mean", "matches", "inliers", "percentage_inliers", "inference_time_ms"]
 DISPLAY_NAMES = {
     "conf_mean": "Mean Confidence",
     "matches": "Number of Matches",
     "inliers": "Number of Inliers",
+    "percentage_inliers": "Percentage of Inliers over Matches",
     "inference_time_ms": "Inference Time (ms)",
 }
 
@@ -59,6 +60,8 @@ def build_plot(csv_a, csv_b, output_dir):
         
         if metric == "inference_time_ms":
             ax.set_ylim(0, 250)
+        
+        ax.set_xticks([])
         
         # Rotazione etichette se necessario
         plt.xticks(rotation=45, ha='right', fontsize=8)
