@@ -4,6 +4,7 @@ import kornia as K
 import torch
 import os
 import csv
+import time
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import matplotlib
@@ -13,10 +14,45 @@ from kornia.feature import LoFTR
 from kornia_moons.viz import draw_LAF_matches
 import matplotlib.pyplot as plt
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def get_runtime_device():
+    if torch.cuda.is_available():
+        try:
+            torch.zeros(1, device="cuda")
+            return torch.device("cuda")
+        except Exception as exc:
+            print(f"Warning: CUDA unavailable, falling back to CPU: {exc}")
+    return torch.device("cpu")
+
+
+device = get_runtime_device()
 
 # LoFTR load
 matcher = LoFTR(pretrained="outdoor").to(device)
+
+def rotm2rpy(R):
+    # Returns [roll, pitch, yaw] in radians
+    sy = np.sqrt(R[0,0] * R[0,0] +  R[1,0] * R[1,0])
+    singular = sy < 1e-6
+    if not singular:
+        x = np.arctan2(R[2,1], R[2,2])
+        y = np.arctan2(-R[2,0], sy)
+        z = np.arctan2(R[1,0], R[0,0])
+    else:
+        x = np.arctan2(-R[1,2], R[1,1])
+        y = np.arctan2(-R[2,0], sy)
+        z = 0
+    return np.array([x, y, z])
+
+def rotm2rpy_candidates(R):
+    rpy_0 = rotm2rpy(R)
+    rpy_1 = np.array([
+        rpy_0[0] + np.pi,
+        np.pi - rpy_0[1],
+        rpy_0[2] + np.pi,
+    ])
+    rpy_0 = (rpy_0 + np.pi) % (2 * np.pi) - np.pi
+    rpy_1 = (rpy_1 + np.pi) % (2 * np.pi) - np.pi
+    return rpy_0, rpy_1
 
 def calculate_rot_error(R_est, R_gt):
     R_rel = R_est @ R_gt.T
@@ -27,13 +63,6 @@ def calculate_trans_error(t_est, t_gt):
     t_est_n = t_est.flatten() / (np.linalg.norm(t_est) + 1e-9)
     t_gt_n = t_gt.flatten() / (np.linalg.norm(t_gt) + 1e-9)
     return np.degrees(np.arccos(np.clip(np.dot(t_est_n, t_gt_n), -1.0, 1.0)))
-
-def calculate_epipolar_error(pts0, pts1, E, K):
-    K_inv = np.linalg.inv(K)
-    p0 = cv2.convertPointsToHomogeneous(pts0)[:, 0, :] @ K_inv.T
-    p1 = cv2.convertPointsToHomogeneous(pts1)[:, 0, :] @ K_inv.T
-    errs = [np.abs(p1[i] @ E @ p0[i].T) for i in range(len(p0))]
-    return np.mean(errs)
 
 def read_keyframe_data(filepath, num_descriptors=256):
     """
@@ -48,20 +77,23 @@ def read_keyframe_data(filepath, num_descriptors=256):
     - translation (3 * 4 byte)
     """
     with open(filepath, 'rb') as f:
-        # Leggi header base
+        # Read the base header
         type_val = struct.unpack('B', f.read(1))[0]
         closest_idx = struct.unpack('i', f.read(4))[0]
         num_kpts = struct.unpack('i', f.read(4))[0]
         
-        # Salta i dati vettoriali
+        # Skip vector data
         f.seek(num_kpts * 8, os.SEEK_CUR)              # keypoints (cv::Point2f)
         f.seek(num_kpts * num_descriptors * 4, os.SEEK_CUR) # descriptors (float)
         
-        # Leggi Rotazione (9 float = 36 byte) e Traslazione (3 float = 12 byte)
+        # Read rotation (9 floats = 36 bytes) and translation (3 floats = 12 bytes)
         rotm = np.frombuffer(f.read(36), dtype=np.float32).reshape(3, 3)
         trans = np.frombuffer(f.read(12), dtype=np.float32)
         
         return rotm, trans
+
+def shortest_angular_distance_deg(angle_a, angle_b):
+    return np.degrees(np.arctan2(np.sin(angle_a - angle_b), np.cos(angle_a - angle_b)))
 
 def load_img(path):
     img = cv2.imread(path)
@@ -133,7 +165,7 @@ target_w, target_h = 960, 256 #almost half the original size (1920x500)
 img0_raw = cv2.resize(img0_raw, (target_w, target_h))
 img0_raw = cv2.resize(img0_raw, (img0_raw.shape[1]//32*32, img0_raw.shape[0]//32*32))
 
-img0 = torch.from_numpy(img0_raw)[None][None].cuda() / 255.
+img0 = torch.from_numpy(img0_raw)[None][None].to(device) / 255.
     
 results = []
 confidences = []
@@ -175,22 +207,28 @@ for img_name in offline_imgs:
     img1_raw = cv2.resize(img1_raw, (target_w, target_h))
         
     # img1_raw = cv2.resize(img1_raw, (img1_raw.shape[1]//32*32, img1_raw.shape[0]//32*32))
-    img1 = torch.from_numpy(img1_raw)[None][None].cuda() / 255.
+    img1 = torch.from_numpy(img1_raw)[None][None].to(device) / 255.
     
     batch = {'image0': img0, 'image1': img1}
     
-    torch.cuda.synchronize() 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    
-    start_event.record()
-    
-    with torch.no_grad():
-        correspondences = matcher(batch)
-    end_event.record()
-    
-    torch.cuda.synchronize()
-    inference_time = start_event.elapsed_time(end_event)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
+        start_event.record()
+
+        with torch.no_grad():
+            correspondences = matcher(batch)
+
+        end_event.record()
+        torch.cuda.synchronize()
+        inference_time = start_event.elapsed_time(end_event)
+    else:
+        start_time = time.perf_counter()
+        with torch.no_grad():
+            correspondences = matcher(batch)
+        inference_time = (time.perf_counter() - start_time) * 1000.0
     inference_times.append(inference_time)
             
     mkpts0 = correspondences['keypoints0'].cpu().numpy()
@@ -216,54 +254,89 @@ for img_name in offline_imgs:
     mkpts0_inliers, mkpts1_inliers, color_inliers = [], [], []
     
     dat_path = os.path.join("Offline_Keyframes_Turn2-3/", img_name.replace('.png', '.dat'))
-    
+    online_dat_path = os.path.join(os.path.dirname(online_img_pth), os.path.splitext(os.path.basename(online_img_pth))[0] + ".dat")
+
+    kf_rot = None
+    kf_trans = None
+    approx_rot = None
+    approx_trans = None
+
     if os.path.exists(dat_path):
-        gt_rot , gt_trans = read_keyframe_data(dat_path)
+        kf_rot, kf_trans = read_keyframe_data(dat_path)
+
+    if os.path.exists(online_dat_path):
+        approx_rot, approx_trans = read_keyframe_data(online_dat_path)
+    else:
+        print(f"Warning: online pose file not found: {online_dat_path}")
 
     # FIVE-POINTS ALGORITHM
     # 1. Undistort keypoints using K and dist_coeffs
-    mkpts0_undistorted = cv2.undistortPoints(mkpts0_filtered, K, dist_coeffs, P=K)
-    mkpts1_undistorted = cv2.undistortPoints(mkpts1_filtered, K, dist_coeffs, P=K)
+    mkptsF_undistorted = cv2.undistortPoints(mkpts0_filtered, K, dist_coeffs, P=K)
+    mkptsK_undistorted = cv2.undistortPoints(mkpts1_filtered, K, dist_coeffs, P=K)
 
     # 2. Use Essential Matrix with undistorted points
-    pts0 = mkpts0_undistorted.reshape(-1, 2)
-    pts1 = mkpts1_undistorted.reshape(-1, 2)
+    ptsF = mkptsF_undistorted.reshape(-1, 2)
+    ptsK = mkptsK_undistorted.reshape(-1, 2)
 
-    rot_err, trans_err, epi_err = 0.0, 0.0, 0.0
+    rot_err, trans_err = 0.0, 0.0
+    roll_err = 0.0
+    pitch_err = 0.0
+    yaw_err = 0.0
 
-    if len(pts0) >= 5:
-        E, mask = cv2.findEssentialMat(pts0, pts1, K, cv2.LMEDS, 0.999, 1.0)
+    if len(ptsF) >= 5 and kf_rot is not None and kf_trans is not None and approx_rot is not None and approx_trans is not None:
+        E, mask = cv2.findEssentialMat(ptsK, ptsF, K, cv2.LMEDS, 0.999, 1.0)
         if E is not None:
-            # Recover relative pose: R_rel and t_rel (camera1 -> camera2)
-            _, R_rel, t_rel, mask_pose = cv2.recoverPose(E, pts0, pts1, K)
+            # Recover relative pose: keyframe -> online frame, matching the ROS convention.
+            _, R_KF, t_KF, mask_pose = cv2.recoverPose(E, ptsK, ptsF, K)
             
-            # --- ROS-LIKE POSE CALCULATION ---
-            # Transform relative pose to world coordinate system using offline GT pose
-            # R_est_world = R_kf * R_rel.T
-            R_est_world = gt_rot @ R_rel.T
+            # Transform relative pose to world coordinates using the keyframe pose.
+            R_est_world = kf_rot @ R_KF.T
             
-            # t_est_world = R_kf * R_rel.T * (-t_rel)
-            t_est_world = gt_rot @ R_rel.T @ (-t_rel.flatten())
+            # Match the ROS-style Euler ambiguity handling.
+            rpy_hypothesis_0, rpy_hypothesis_1 = rotm2rpy_candidates(R_est_world)
+            yaw_est_0 = rpy_hypothesis_0[2]
+            yaw_est_1 = rpy_hypothesis_1[2]
             
-            # Direction vectors for translation error
+            # Compare yaw against the online frame approximation, matching camera_worker.
+            rpy_ref = rotm2rpy(approx_rot)
+            yaw_ref = rpy_ref[2]
+            
+            # Compute yaw error using the shortest angular distance.
+            yaw_err_0 = shortest_angular_distance_deg(yaw_est_0, yaw_ref)
+            yaw_err_1 = shortest_angular_distance_deg(yaw_est_1, yaw_ref)
+            chosen_rpy = rpy_hypothesis_0 if abs(yaw_err_0) < abs(yaw_err_1) else rpy_hypothesis_1
+            roll_err = shortest_angular_distance_deg(chosen_rpy[0], rpy_ref[0])
+            pitch_err = shortest_angular_distance_deg(chosen_rpy[1], rpy_ref[1])
+            yaw_err = yaw_err_0 if abs(yaw_err_0) < abs(yaw_err_1) else yaw_err_1
+            
+            # t_est_world = R_kf * R_KF.T * (-t_KF)
+            t_est_world = kf_rot @ R_KF.T @ (-t_KF.flatten())
+            
+            # Direction vectors for translation error.
             dir_est = t_est_world / (np.linalg.norm(t_est_world) + 1e-9)
-            dir_true = gt_trans.flatten() / (np.linalg.norm(gt_trans) + 1e-9)
+            dir_true = (approx_trans.flatten() - kf_trans.flatten()) / (np.linalg.norm(approx_trans.flatten() - kf_trans.flatten()) + 1e-9)
             
-            # Handle potential ambiguity (flip direction if opposite)
-            if np.dot(dir_est, dir_true) < 0.0:
-                dir_est = -dir_est
-            
-            # Calculate angular errors
+            # Calculate angular errors.
             dot_val = np.clip(np.dot(dir_est, dir_true), -1.0, 1.0)
             trans_err = np.degrees(np.arccos(dot_val))
-            rot_err = calculate_rot_error(R_est_world, gt_rot)
-            
-            # Epipolar error calculation
-            mask_inliers = mask_pose.flatten() > 0
-            epi_err = calculate_epipolar_error(pts0[mask_inliers], pts1[mask_inliers], E, K)
-            
-            print(f"Rot Err: {rot_err:.2f} deg | Trans Err: {trans_err:.2f} deg | Epi Err: {epi_err:.6f}")
+            rot_err = calculate_rot_error(R_est_world, approx_rot)
 
+            # Check the four equivalent recoverPose hypotheses, as in camera_worker.
+            rec_pose_R = [R_KF, R_KF, -R_KF, -R_KF]
+            rec_pose_t = [t_KF.flatten(), -t_KF.flatten(), t_KF.flatten(), -t_KF.flatten()]
+            rec_pose_ang_err = []
+            for rel_R, rel_t in zip(rec_pose_R, rec_pose_t):
+                dir_kf = kf_rot @ rel_R.T @ rel_t
+                dir_kf = dir_kf / (np.linalg.norm(dir_kf) + 1e-9)
+                rec_pose_ang_err.append(np.degrees(np.arccos(np.clip(np.dot(dir_kf, dir_true), -1.0, 1.0))))
+            
+            # Inlier mask kept for geometric filtering, but the CSV stores only pose errors.
+            mask_inliers = mask_pose.flatten() > 0
+            
+            print(f"Roll Err: {roll_err:.2f} deg | Pitch Err: {pitch_err:.2f} deg | Yaw Err: {yaw_err:.2f} deg | Trans Err: {trans_err:.2f} deg")
+            print(f"RecoverPose angle checks: {[round(v, 2) for v in rec_pose_ang_err]}")
+
+            num_inliers = int(np.sum(mask_inliers))
             mkpts0_inliers = mkpts0_filtered[mask_inliers]
             mkpts1_inliers = mkpts1_filtered[mask_inliers]
             color_inliers = color_filtered[mask_inliers]
@@ -293,9 +366,10 @@ for img_name in offline_imgs:
         "inliers": int(num_inliers),
         "inference_time_ms": float(inference_time),
         "threshold": float(threshold),
-        "rot_error_deg": float(rot_err),
+        "roll_error_deg": float(roll_err),
+        "pitch_error_deg": float(pitch_err),
+        "yaw_error_deg": float(yaw_err),
         "trans_error_deg": float(trans_err),
-        "epipolar_error": float(epi_err)
     })
 
 summary_rows = [
@@ -308,9 +382,10 @@ summary_rows = [
         "inliers": float(np.mean(inliers_geometric_number)),
         "inference_time_ms": float(sum(inference_times[1:])/(len(inference_times)-1)),
         "threshold": float(threshold),
-        "rot_error_deg": float(np.mean([row["rot_error_deg"] for row in csv_rows])),
+        "roll_error_deg": float(np.mean([row["roll_error_deg"] for row in csv_rows])),
+        "pitch_error_deg": float(np.mean([row["pitch_error_deg"] for row in csv_rows])),
+        "yaw_error_deg": float(np.mean([row["yaw_error_deg"] for row in csv_rows])),
         "trans_error_deg": float(np.mean([row["trans_error_deg"] for row in csv_rows])),
-        "epipolar_error": float(np.mean([row["epipolar_error"] for row in csv_rows])),
         "note": "Mean values",
     },
     {
@@ -322,9 +397,10 @@ summary_rows = [
         "inliers": float(np.std(inliers_geometric_number)),
         "inference_time_ms": float(np.std(sum(inference_times[1:])/(len(inference_times)-1))**2),
         "threshold": float(threshold),
-        "rot_error_deg": float(np.std([row["rot_error_deg"] for row in csv_rows])**2),
+        "roll_error_deg": float(np.std([row["roll_error_deg"] for row in csv_rows])**2),
+        "pitch_error_deg": float(np.std([row["pitch_error_deg"] for row in csv_rows])**2),
+        "yaw_error_deg": float(np.std([row["yaw_error_deg"] for row in csv_rows])**2),
         "trans_error_deg": float(np.std([row["trans_error_deg"] for row in csv_rows])**2),
-        "epipolar_error": float(np.std([row["epipolar_error"] for row in csv_rows])**2),
         "note": "Variance values",
     }
 ]
@@ -339,9 +415,10 @@ fieldnames = ["image_name",
               "inliers",
               "inference_time_ms",
               "threshold",
-              "rot_error_deg", 
+              "roll_error_deg",
+              "pitch_error_deg",
+              "yaw_error_deg",
               "trans_error_deg",
-              "epipolar_error",
               "note"
               ]
 
