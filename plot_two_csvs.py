@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+import re
 import argparse
 import csv
 import os
@@ -7,13 +7,27 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 
-METRICS = ["conf_mean", "matches", "inliers", "percentage_inliers", "inference_time_ms"]
+METRICS = [
+    "conf_mean",
+    "matches",
+    "inliers",
+    "percentage_inliers",
+    "inference_time_ms",
+    "roll_error_deg",
+    "pitch_error_deg",
+    "yaw_error_deg",
+    "trans_error_deg",
+]
 DISPLAY_NAMES = {
     "conf_mean": "Mean Confidence",
     "matches": "Number of Matches",
     "inliers": "Number of Inliers",
     "percentage_inliers": "Percentage of Inliers over Matches",
     "inference_time_ms": "Inference Time (ms)",
+    "roll_error_deg": "Roll Error (deg)",
+    "pitch_error_deg": "Pitch Error (deg)",
+    "yaw_error_deg": "Yaw Error (deg)",
+    "trans_error_deg": "Translation Error (deg)",
 }
 
 
@@ -33,25 +47,34 @@ def load_metric_series(csv_path, metric):
     return values
 
 
-def build_plot(csv_a, csv_b, output_dir):
-    series_a = {metric: load_metric_series(csv_a, metric) for metric in METRICS}
-    series_b = {metric: load_metric_series(csv_b, metric) for metric in METRICS}
+def build_plot(csv_files, output_dir):
+    series_data = []
+    for csv_path in csv_files:
+        series = {metric: load_metric_series(csv_path, metric) for metric in METRICS}
+        label = os.path.basename(csv_path).replace("_stats.csv", "")
+        series_data.append((label, series))
 
-    all_images = sorted(set(series_a["conf_mean"]) | set(series_b["conf_mean"]))
+    all_images = sorted(set().union(*[s["conf_mean"].keys() for _, s in series_data]))
     if not all_images:
         raise ValueError("No image names found in the provided CSV files.")
 
-    label_a = os.path.basename(csv_a).replace("_stats.csv", "")
-    label_b = os.path.basename(csv_b).replace("_stats.csv", "")
+    formatted_labels = []
+    counters = {}
+    for img in all_images:
+        base = Path(img).stem
+        match = re.match(r"([RCL])", base)
+        prefix = match.group(1) if match else "X"
+        
+        count = counters.get(prefix, 0)
+        formatted_labels.append(f"{prefix}{count}")
+        counters[prefix] = count + 1
 
     for metric in METRICS:
-        fig, ax = plt.subplots(figsize=(10, 5))
+        fig, ax = plt.subplots(figsize=(12, 6))
         
-        values_a = [series_a[metric].get(name, float("nan")) for name in all_images]
-        values_b = [series_b[metric].get(name, float("nan")) for name in all_images]
-
-        ax.plot(all_images, values_a, marker="o", linewidth=1.5, label=label_a)
-        ax.plot(all_images, values_b, marker="x", linewidth=1.5, label=label_b)
+        for label, series in series_data:
+            values = [series[metric].get(name, float("nan")) for name in all_images]
+            ax.plot(formatted_labels, values, marker="o", markersize=4, linewidth=1.5, label=label)
         
         ax.set_ylabel(DISPLAY_NAMES[metric])
         ax.set_title(f"Comparison: {DISPLAY_NAMES[metric]}")
@@ -59,25 +82,19 @@ def build_plot(csv_a, csv_b, output_dir):
         ax.legend(loc="best")
         
         if metric == "inference_time_ms":
-            ax.set_ylim(0, 250)
+            ax.set_ylim(bottom=0, top=250)
         
-        ax.set_xticks([])
-        
-        # Rotazione etichette se necessario
         plt.xticks(rotation=45, ha='right', fontsize=8)
-        
         plt.tight_layout()
         
-        # Salva file separato per ogni metrica
         save_path = os.path.join(output_dir, f"comparison_{metric}.png")
         plt.savefig(save_path, dpi=200)
         plt.close(fig)
         print(f"Saved: {save_path}")
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Plot metrics from two CSV files")
-    parser.add_argument("csv_a", help="Path to the first CSV file")
-    parser.add_argument("csv_b", help="Path to the second CSV file")
+    parser = argparse.ArgumentParser(description="Plot metrics from multiple CSV files")
+    parser.add_argument("csv_files", nargs="+", help="Paths to the CSV files")
     parser.add_argument(
         "-o",
         "--output_dir",
@@ -88,16 +105,16 @@ def parse_args():
 
 def main():
     args = parse_args()
-    csv_a = Path(args.csv_a).expanduser().resolve()
-    csv_b = Path(args.csv_b).expanduser().resolve()
+    csv_paths = [Path(p).expanduser().resolve() for p in args.csv_files]
     output_dir = Path(args.output_dir).expanduser().resolve()
 
-    if not csv_a.exists() or not csv_b.exists():
-        raise FileNotFoundError("One or both CSV files not found.")
+    if not all(p.exists() for p in csv_paths):
+        raise FileNotFoundError("One or more CSV files not found.")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    build_plot(csv_a, csv_b, output_dir)
+    build_plot(csv_paths, output_dir)
 
 
 if __name__ == "__main__":
     main()
+
