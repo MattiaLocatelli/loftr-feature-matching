@@ -47,14 +47,15 @@ def load_metric_series(csv_path, metric):
     return values
 
 
-def build_plot(csv_files, output_dir):
+def build_plot(csv_files, output_dir, colors=None):
     series_data = []
-    for csv_path in csv_files:
+    for i, csv_path in enumerate(csv_files):
         series = {metric: load_metric_series(csv_path, metric) for metric in METRICS}
         label = os.path.basename(csv_path).replace("_stats.csv", "")
-        series_data.append((label, series))
+        color = colors[i] if colors and i < len(colors) else None
+        series_data.append((label, series, color))
 
-    all_images = sorted(set().union(*[s["conf_mean"].keys() for _, s in series_data]))
+    all_images = sorted(set().union(*[s["conf_mean"].keys() for _, s, _ in series_data]))
     if not all_images:
         raise ValueError("No image names found in the provided CSV files.")
 
@@ -72,9 +73,9 @@ def build_plot(csv_files, output_dir):
     for metric in METRICS:
         fig, ax = plt.subplots(figsize=(12, 6))
         
-        for label, series in series_data:
+        for label, series, color in series_data:
             values = [series[metric].get(name, float("nan")) for name in all_images]
-            ax.plot(formatted_labels, values, marker="o", markersize=4, linewidth=1.5, label=label)
+            ax.plot(formatted_labels, values, marker="o", markersize=4, linewidth=1.5, label=label, color=color)
         
         ax.set_ylabel(DISPLAY_NAMES[metric])
         ax.set_title(f"Comparison: {DISPLAY_NAMES[metric]}")
@@ -101,6 +102,12 @@ def parse_args():
         default="comparison_plots",
         help="Output directory (default: comparison_plots)",
     )
+    parser.add_argument(
+        "-c",
+        "--colors",
+        nargs="*",
+        help="List of colors for each CSV file (e.g., -c red blue)",
+    )
     return parser.parse_args()
 
 def main():
@@ -112,7 +119,7 @@ def main():
         raise FileNotFoundError("One or more CSV files not found.")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    build_plot(csv_paths, output_dir)
+    build_plot(csv_paths, output_dir, args.colors)
 
 
 if __name__ == "__main__":
