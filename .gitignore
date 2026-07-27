@@ -5,5 +5,9 @@
 /checkpoint
 /Offline_Keyframes_Turn2-3
 /Offline_Keyframes_Turn23
-output_matches/
+/Offline_Keyframes_Turn5
+/Offline_Keyframes_Turn6
+output_matches_turn23/
+output_matches_turn6/
+output_matches_turn5/
 /csv
